@@ -24,3 +24,12 @@
   - `PriceCalculatorTest`: Validated strict integer arithmetic, proper rounding (`ceil`/`floor`), and boundary limits for affordable quantity calculations.
   - `WalletTransactionImmutabilityTest`: Verified that exceptions are rigorously thrown when attempting to update or delete `WalletTransaction` records.
   - `WalletActionsTest`: Feature tested DB transaction integrity, row-locking (simulated implicitly), `InsufficientBalanceException`, and successful implementation of idempotency across Credit and Debit actions.
+
+## 2026-08-30
+- **Phase 1 (Vertical Slice) Step 4**: Mock SMM Integration.
+- **SMM DTOs**:
+  - `App\Modules\Smm\DTOs\ProviderOrderResult`: Immutable `readonly` DTO encapsulating provider order creation results (`isSuccess`, `providerOrderId`, `errorMessage`) with named constructors `success()` and `failure()` for clean instantiation.
+  - `App\Modules\Smm\DTOs\ProviderOrderStatusResult`: Immutable `readonly` DTO encapsulating order status query results. Status is mapped to the internal `OrderStatus` enum by the adapter, ensuring no raw provider strings leak into the application layer.
+- **SMM Contract**: Created `App\Modules\Smm\Contracts\SmmProviderContract` interface defining `createOrder()`, `getOrderStatus()`, and `getBalance()` — the uniform API surface all provider adapters (Mock, V1, V2) must implement.
+- **Mock Adapter**: Implemented `App\Modules\Smm\Adapters\MockProviderAdapter` satisfying `SmmProviderContract`. Simulates order creation with `MOCK-XXXXX` IDs, random `PROCESSING`/`COMPLETED` status responses, and a fixed `100000` balance. Uses `usleep(100_000)` for minimal latency simulation without slowing tests.
+- **Provider Factory**: Built `App\Modules\Smm\Factories\SmmProviderFactory` with a static `make(string $providerCode)` method using `match()`. Currently defaults to `MockProviderAdapter` for all codes. Structured for Phase 3 extensibility — real provider adapters will be added as additional match arms.
