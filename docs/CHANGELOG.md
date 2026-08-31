@@ -33,3 +33,49 @@
 - **SMM Contract**: Created `App\Modules\Smm\Contracts\SmmProviderContract` interface defining `createOrder()`, `getOrderStatus()`, and `getBalance()` — the uniform API surface all provider adapters (Mock, V1, V2) must implement.
 - **Mock Adapter**: Implemented `App\Modules\Smm\Adapters\MockProviderAdapter` satisfying `SmmProviderContract`. Simulates order creation with `MOCK-XXXXX` IDs, random `PROCESSING`/`COMPLETED` status responses, and a fixed `100000` balance. Uses `usleep(100_000)` for minimal latency simulation without slowing tests.
 - **Provider Factory**: Built `App\Modules\Smm\Factories\SmmProviderFactory` with a static `make(string $providerCode)` method using `match()`. Currently defaults to `MockProviderAdapter` for all codes. Structured for Phase 3 extensibility — real provider adapters will be added as additional match arms.
+
+## 2026-08-31
+- **Phase 1 (Vertical Slice) Step 5**: Complete Order Module, Purchase Flow, SMM Submission Job & Order Tracking.
+- **Missing Infrastructure Fixed** (discovered during Step 5 research):
+  - Created migrations for `categories`, `services`, `smm_providers`, `conversation_states` tables (were missing from Steps 1-3).
+  - Added `action_token_expires_at` and `submitted_at` columns to `orders` table via additive migration.
+  - Added `actor_id` column to `order_events` table via additive migration.
+  - Created `config/telegram.php` and `config/smm.php` configuration files.
+  - Created `routes/web.php` with Telegram webhook POST route (CSRF exempt).
+  - Created `routes/console.php` with hourly conversation cleanup schedule.
+  - Created seeders: `MockProviderSeeder`, `CatalogSeeder`, `DatabaseSeeder`.
+- **Order Module**:
+  - `App\Modules\Orders\Models\Order`: Full model with `$fillable`, `$casts`, relationships (`user`, `service`, `orderEvents`), `scopeForUser()`, `transitionTo()` with status validation and automatic event recording, `amountToman()` helper.
+  - `App\Modules\Orders\Models\OrderEvent`: Enhanced with `order()` relationship and proper `$casts`.
+  - `App\Modules\Orders\Enums\OrderStatus`: Enhanced with `allowedTransitions()`, `canTransitionTo()`, `isTerminal()`, and Farsi `label()`.
+  - `App\Modules\Orders\Exceptions\InvalidStatusTransitionException`: Domain exception for rejected transitions.
+  - `App\Modules\Orders\Actions\PlaceOrderAction`: Full transactional flow — action token idempotency, service/provider validation, dynamic input validation, quantity bounds, integer price calculation, wallet debit, order creation, event recording, post-commit `SubmitSmmOrderJob` dispatch.
+  - `App\Modules\Orders\Actions\RefundOrderAction`: Credits wallet via `CreditWalletAction` with unique idempotency key. Prevents duplicate refunds. Transitions to REFUNDED.
+  - `App\Modules\Orders\Services\OrderQueryService`: Paginated user orders, search by code, detail by ID. All queries user-scoped for ownership enforcement.
+- **SMM Additions**:
+  - `App\Modules\Smm\DTOs\NormalizedOrderPayload`: Provider-agnostic DTO bridging order domain to SMM adapters.
+  - `App\Modules\Smm\Models\SmmProvider`: Eloquent model for `smm_providers` table.
+- **Shared Helpers**:
+  - `App\Modules\Shared\Helpers\OrderCodeGenerator`: Generates `ORD-YYYYMMDD-XXXXXX` format codes using cryptographic randomness.
+  - `App\Modules\Shared\Helpers\ActionTokenGenerator`: 64-char hex token from `random_bytes(32)`.
+- **Telegram Module**:
+  - `ConversationManager`: Full implementation with DB-backed state, TTL checking, routing to active conversations.
+  - `PurchaseConversation`: State machine — category → service → details → dynamic inputs → quantity → summary → action token → confirm.
+  - `OrderTrackingConversation`: List orders, search by code, detail display with ownership enforcement.
+  - `MessageHandler`: Routes main menu text buttons to conversations.
+  - `CallbackQueryHandler`: Delegates callback queries to ConversationManager.
+  - `TelegramWebhookController`: Updated to use MessageHandler and CallbackQueryHandler.
+  - `ConversationState` model, `CategoryKeyboard`, `ServiceKeyboard`, `ConfirmOrderKeyboard`.
+- **Jobs**:
+  - `SubmitSmmOrderJob`: Production-safe job — queued→submitting→submitted flow, provider factory, refund on failure, user notification.
+  - `CleanExpiredConversationsJob`: Scheduled hourly on 'low' queue.
+- **Artisan Commands**:
+  - `telegram:set-webhook`, `telegram:webhook-info`, `wallet:seed-balance`.
+- **Catalog Enhancement**: Added `provider()` relationship and `scopeAvailableForPurchase()` to `Service` model.
+- **Automated Tests**:
+  - `OrderStatusEnumTest`: Valid/invalid transitions, terminal states, labels (16 assertions).
+  - `PlaceOrderActionTest`: Correct price, wallet debit, event creation, job dispatch, quantity/service validation, snapshot storage (7 test methods).
+  - `IdempotentOrderTest`: Same token twice → 1 order, 1 debit, 1 job.
+  - `OrderTrackingTest`: Ownership enforcement across queries.
+  - `SubmitSmmOrderJobTest`: Full job lifecycle, idempotency, event recording.
+  - `SubmitSmmOrderJobFailureTest`: Adapter failure → failed → refunded, no double refunds.

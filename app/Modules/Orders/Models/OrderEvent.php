@@ -5,12 +5,24 @@ declare(strict_types=1);
 namespace App\Modules\Orders\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use LogicException;
 
 class OrderEvent extends Model
 {
     protected $guarded = [];
     const UPDATED_AT = null;
+
+    protected $casts = [
+        'order_id' => 'integer',
+        'actor_id' => 'integer',
+        'payload_json' => 'array',
+    ];
+
+    public function order(): BelongsTo
+    {
+        return $this->belongsTo(Order::class);
+    }
 
     public function update(array $attributes = [], array $options = [])
     {

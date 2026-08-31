@@ -8,14 +8,16 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
 use App\Modules\Telegram\Handlers\StartHandler;
-use App\Modules\Telegram\Conversations\ConversationManager;
+use App\Modules\Telegram\Handlers\MessageHandler;
+use App\Modules\Telegram\Handlers\CallbackQueryHandler;
 use Illuminate\Support\Facades\Log;
 
 class TelegramWebhookController extends Controller
 {
     public function __construct(
         private readonly StartHandler $startHandler,
-        private readonly ConversationManager $conversationManager
+        private readonly MessageHandler $messageHandler,
+        private readonly CallbackQueryHandler $callbackQueryHandler,
     ) {}
 
     public function handle(Request $request): Response
@@ -35,10 +37,10 @@ class TelegramWebhookController extends Controller
             if (str_starts_with($text, '/start')) {
                 $this->startHandler->handle($update['message']);
             } else {
-                $this->conversationManager->handle($update['message']);
+                $this->messageHandler->handle($update['message']);
             }
         } elseif (isset($update['callback_query'])) {
-            $this->conversationManager->handleCallback($update['callback_query']);
+            $this->callbackQueryHandler->handle($update['callback_query']);
         }
 
         return response('OK', 200);

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Modules\Catalog\Models;
 
+use App\Modules\Smm\Models\SmmProvider;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Builder;
@@ -43,8 +44,19 @@ class Service extends Model
         return $this->belongsTo(Category::class);
     }
 
+    public function provider(): BelongsTo
+    {
+        return $this->belongsTo(SmmProvider::class, 'provider_id');
+    }
+
     public function scopeActive(Builder $query): Builder
     {
         return $query->where('is_active', true);
+    }
+
+    public function scopeAvailableForPurchase(Builder $query): Builder
+    {
+        return $query->where('is_active', true)
+            ->whereHas('category', fn (Builder $q) => $q->where('is_active', true));
     }
 }
