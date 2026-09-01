@@ -9,8 +9,10 @@ use App\Jobs\SubmitSmmOrderJob;
 use App\Models\User;
 use App\Modules\Catalog\Models\Category;
 use App\Modules\Catalog\Models\Service;
+use App\Modules\Orders\Actions\RefundOrderAction;
 use App\Modules\Orders\Enums\OrderStatus;
 use App\Modules\Orders\Models\Order;
+use App\Modules\Orders\Models\OrderEvent;
 use App\Modules\Smm\Models\SmmProvider;
 use App\Modules\Wallet\Models\WalletAccount;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -61,7 +63,7 @@ class SubmitSmmOrderJobTest extends TestCase
     public function test_job_transitions_order_to_submitted(): void
     {
         $job = new SubmitSmmOrderJob($this->order->id);
-        $job->handle(app(\App\Modules\Orders\Actions\RefundOrderAction::class));
+        $job->handle(app(RefundOrderAction::class));
 
         $this->order->refresh();
         $this->assertEquals(OrderStatus::SUBMITTED, $this->order->status);
@@ -70,7 +72,7 @@ class SubmitSmmOrderJobTest extends TestCase
     public function test_job_stores_provider_order_id(): void
     {
         $job = new SubmitSmmOrderJob($this->order->id);
-        $job->handle(app(\App\Modules\Orders\Actions\RefundOrderAction::class));
+        $job->handle(app(RefundOrderAction::class));
 
         $this->order->refresh();
         $this->assertNotNull($this->order->provider_order_id);
@@ -80,7 +82,7 @@ class SubmitSmmOrderJobTest extends TestCase
     public function test_job_creates_order_events(): void
     {
         $job = new SubmitSmmOrderJob($this->order->id);
-        $job->handle(app(\App\Modules\Orders\Actions\RefundOrderAction::class));
+        $job->handle(app(RefundOrderAction::class));
 
         // Should have submitting + submitted events
         $this->assertDatabaseHas('order_events', [
@@ -93,10 +95,19 @@ class SubmitSmmOrderJobTest extends TestCase
         ]);
     }
 
+    public function test_job_creates_exactly_two_events_for_successful_submission(): void
+    {
+        $job = new SubmitSmmOrderJob($this->order->id);
+        $job->handle(app(RefundOrderAction::class));
+
+        $eventCount = OrderEvent::where('order_id', $this->order->id)->count();
+        $this->assertSame(2, $eventCount, 'Successful submission should create exactly 2 events: submitting + submitted.');
+    }
+
     public function test_job_sends_user_notification(): void
     {
         $job = new SubmitSmmOrderJob($this->order->id);
-        $job->handle(app(\App\Modules\Orders\Actions\RefundOrderAction::class));
+        $job->handle(app(RefundOrderAction::class));
 
         Queue::assertPushed(SendTelegramMessageJob::class);
     }
@@ -105,14 +116,14 @@ class SubmitSmmOrderJobTest extends TestCase
     {
         // First run
         $job = new SubmitSmmOrderJob($this->order->id);
-        $job->handle(app(\App\Modules\Orders\Actions\RefundOrderAction::class));
+        $job->handle(app(RefundOrderAction::class));
 
         $this->order->refresh();
         $providerId = $this->order->provider_order_id;
 
         // Second run — should skip
         $job2 = new SubmitSmmOrderJob($this->order->id);
-        $job2->handle(app(\App\Modules\Orders\Actions\RefundOrderAction::class));
+        $job2->handle(app(RefundOrderAction::class));
 
         $this->order->refresh();
         $this->assertEquals($providerId, $this->order->provider_order_id);
@@ -123,8 +134,46 @@ class SubmitSmmOrderJobTest extends TestCase
     {
         $job = new SubmitSmmOrderJob(99999);
         // Should not throw
-        $job->handle(app(\App\Modules\Orders\Actions\RefundOrderAction::class));
+        $job->handle(app(RefundOrderAction::class));
 
         $this->assertTrue(true); // No exception = pass
     }
+
+    public function test_job_sets_submitted_at_timestamp(): void
+    {
+        $job = new SubmitSmmOrderJob($this->order->id);
+        $job->handle(app(RefundOrderAction::class));
+
+        $this->order->refresh();
+        $this->assertNotNull($this->order->submitted_at);
+    }
+
+    public function test_job_uses_correct_provider_code_from_snapshot(): void
+    {
+        $job = new SubmitSmmOrderJob($this->order->id);
+        $job->handle(app(RefundOrderAction::class));
+
+        $this->order->refresh();
+        // MockProviderAdapter produces MOCK- prefixed IDs — confirms correct factory routing
+        $this->assertStringStartsWith('MOCK-', $this->order->provider_order_id);
+    }
+
+    public function test_no_duplicate_submission_on_repeated_execution(): void
+    {
+        // First run
+        $job1 = new SubmitSmmOrderJob($this->order->id);
+        $job1->handle(app(RefundOrderAction::class));
+
+        $eventCountAfterFirst = OrderEvent::where('order_id', $this->order->id)->count();
+
+        // Second run — order is now SUBMITTED, so job skips
+        $job2 = new SubmitSmmOrderJob($this->order->id);
+        $job2->handle(app(RefundOrderAction::class));
+
+        $eventCountAfterSecond = OrderEvent::where('order_id', $this->order->id)->count();
+
+        // No new events should be created
+        $this->assertSame($eventCountAfterFirst, $eventCountAfterSecond);
+    }
 }
+

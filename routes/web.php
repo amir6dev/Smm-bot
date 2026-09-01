@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 use App\Modules\Telegram\Controllers\TelegramWebhookController;
+use App\Modules\Telegram\Middleware\TelegramWebhookRateLimiter;
 
 /*
 |--------------------------------------------------------------------------
@@ -11,4 +12,6 @@ use App\Modules\Telegram\Controllers\TelegramWebhookController;
 
 Route::post('telegram/webhook/{secret_path}', [TelegramWebhookController::class, 'handle'])
     ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\VerifyCsrfToken::class])
+    ->middleware(TelegramWebhookRateLimiter::class)
     ->name('telegram.webhook');
+

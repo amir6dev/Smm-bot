@@ -21,7 +21,17 @@ class SubmitSmmOrderJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $tries = 1;
+    /**
+     * Retry up to 3 times with exponential backoff (10s, then 60s).
+     */
+    public int $tries = 3;
+
+    /**
+     * Backoff intervals in seconds between retry attempts.
+     *
+     * @var array<int>
+     */
+    public array $backoff = [10, 60];
 
     public function __construct(
         public readonly int $orderId,
@@ -76,9 +86,21 @@ class SubmitSmmOrderJob implements ShouldQueue
         try {
             $result = $provider->createOrder($payload->toArray());
         } catch (Throwable $e) {
+            // Retriable failure — revert to queued and let Laravel retry
             Log::error("SubmitSmmOrderJob: Provider threw exception for order {$this->orderId}.", ['error' => $e->getMessage()]);
-            $this->handleFailure($order, $refundOrderAction, $e->getMessage());
-            return;
+
+            try {
+                $order->transitionTo(OrderStatus::QUEUED, 'system', [
+                    'action' => 'smm_submission_retry',
+                    'error' => $e->getMessage(),
+                    'attempt' => $this->attempts(),
+                ]);
+            } catch (Throwable $transitionError) {
+                Log::error("SubmitSmmOrderJob: Could not revert order {$this->orderId} to queued.", ['error' => $transitionError->getMessage()]);
+            }
+
+            // Re-throw so Laravel's queue retry mechanism handles backoff
+            throw $e;
         }
 
         // Step 7: Handle success
@@ -97,16 +119,36 @@ class SubmitSmmOrderJob implements ShouldQueue
             return;
         }
 
-        // Step 8: Handle failure
-        $this->handleFailure($order, $refundOrderAction, $result->errorMessage ?? 'Unknown error');
+        // Step 8: Handle explicit provider failure (non-retriable — provider returned failure result)
+        $this->handleTerminalFailure($order, $refundOrderAction, $result->errorMessage ?? 'Unknown error');
+    }
+
+    /**
+     * Called by Laravel when all retry attempts are exhausted.
+     * Handles final failure: transition to failed, refund, notify.
+     */
+    public function failed(Throwable $exception): void
+    {
+        $order = Order::find($this->orderId);
+        if (!$order) {
+            return;
+        }
+
+        // Only handle if order is still in a retriable state
+        if (!in_array($order->status, [OrderStatus::QUEUED, OrderStatus::SUBMITTING], true)) {
+            return;
+        }
+
+        $refundOrderAction = app(RefundOrderAction::class);
+        $this->handleTerminalFailure($order, $refundOrderAction, $exception->getMessage());
     }
 
     /**
      * Handle terminal SMM submission failure: transition to failed, refund, notify.
      */
-    private function handleFailure(Order $order, RefundOrderAction $refundOrderAction, string $errorMessage): void
+    private function handleTerminalFailure(Order $order, RefundOrderAction $refundOrderAction, string $errorMessage): void
     {
-        Log::warning("SubmitSmmOrderJob: Order {$order->id} submission failed.", ['error' => $errorMessage]);
+        Log::warning("SubmitSmmOrderJob: Order {$order->id} submission failed permanently.", ['error' => $errorMessage]);
 
         try {
             $order->transitionTo(OrderStatus::FAILED, 'system', [
@@ -148,3 +190,4 @@ class SubmitSmmOrderJob implements ShouldQueue
         SendTelegramMessageJob::dispatch($chatId, $message);
     }
 }
+

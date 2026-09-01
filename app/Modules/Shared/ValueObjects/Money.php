@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Modules\Shared\ValueObjects;
 
 use InvalidArgumentException;
+use OverflowException;
 
 final readonly class Money
 {
@@ -15,12 +16,27 @@ final readonly class Money
 
     public static function fromToman(int $toman): self
     {
+        // Overflow protection: PHP_INT_MAX / 10 = max safe toman value
+        if ($toman > 0 && $toman > intdiv(PHP_INT_MAX, 10)) {
+            throw new OverflowException("Toman amount {$toman} would overflow when converted to Rial.");
+        }
+
         return new self($toman * 10);
+    }
+
+    public static function fromRial(int $rial): self
+    {
+        return new self($rial);
     }
 
     public function toToman(): int
     {
-        return (int) ($this->amountRial / 10);
+        return intdiv($this->amountRial, 10);
+    }
+
+    public function toRial(): int
+    {
+        return $this->amountRial;
     }
 
     public function add(self $other): self
@@ -47,3 +63,4 @@ final readonly class Money
         return $this->amountRial >= $other->amountRial;
     }
 }
+
