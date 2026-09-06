@@ -12,14 +12,16 @@ use App\Modules\Catalog\Models\Service;
 use App\Modules\Orders\Actions\RefundOrderAction;
 use App\Modules\Orders\Enums\OrderStatus;
 use App\Modules\Orders\Models\Order;
-use App\Modules\Smm\Adapters\MockProviderAdapter;
 use App\Modules\Smm\Contracts\SmmProviderContract;
 use App\Modules\Smm\DTOs\ProviderOrderResult;
+use App\Modules\Smm\DTOs\ProviderOrderStatusResult;
 use App\Modules\Smm\Factories\SmmProviderFactory;
 use App\Modules\Smm\Models\SmmProvider;
 use App\Modules\Wallet\Models\WalletAccount;
+use App\Modules\Wallet\Models\WalletTransaction;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
+use RuntimeException;
 use Tests\TestCase;
 
 class SubmitSmmOrderJobFailureTest extends TestCase
@@ -36,7 +38,12 @@ class SubmitSmmOrderJobFailureTest extends TestCase
         Queue::fake([SendTelegramMessageJob::class]);
 
         $this->user = User::create(['telegram_id' => 666777888, 'first_name' => 'FailTest']);
-        $this->wallet = WalletAccount::create(['user_id' => $this->user->id, 'available_amount_rial' => 475000, 'blocked_amount_rial' => 0, 'version' => 1]);
+        $this->wallet = WalletAccount::create([
+            'user_id' => $this->user->id,
+            'available_amount_rial' => 475000,
+            'blocked_amount_rial' => 0,
+            'version' => 1,
+        ]);
 
         $provider = SmmProvider::create([
             'name' => 'Mock', 'code' => 'mock_fail', 'base_url' => 'https://mock.local',
@@ -65,9 +72,12 @@ class SubmitSmmOrderJobFailureTest extends TestCase
         ]);
     }
 
-    public function test_adapter_failure_transitions_order_to_failed(): void
+    // ──────────────────────────────────────────────
+    // Explicit Provider Failure (non-retriable)
+    // ──────────────────────────────────────────────
+
+    public function test_explicit_failure_transitions_order_to_failed_and_refunded(): void
     {
-        // Bind a failing mock adapter
         $this->mockFailingAdapter();
 
         $job = new SubmitSmmOrderJob($this->order->id);
@@ -77,7 +87,7 @@ class SubmitSmmOrderJobFailureTest extends TestCase
         $this->assertEquals(OrderStatus::REFUNDED, $this->order->status);
     }
 
-    public function test_adapter_failure_refunds_wallet(): void
+    public function test_explicit_failure_refunds_wallet(): void
     {
         $this->mockFailingAdapter();
 
@@ -108,12 +118,135 @@ class SubmitSmmOrderJobFailureTest extends TestCase
         $this->assertEquals($balanceAfterFirstRefund, $this->wallet->available_amount_rial);
 
         // Only one refund transaction
-        $refundTransactions = \App\Modules\Wallet\Models\WalletTransaction::where('idempotency_key', "order-refund:{$this->order->id}")->count();
+        $refundTransactions = WalletTransaction::where('idempotency_key', "order-refund:{$this->order->id}")->count();
         $this->assertEquals(1, $refundTransactions);
     }
 
+    // ──────────────────────────────────────────────
+    // Provider Exception (retriable path)
+    // ──────────────────────────────────────────────
+
+    public function test_provider_exception_rethrows_for_retry(): void
+    {
+        $this->mockThrowingAdapter();
+
+        $job = new SubmitSmmOrderJob($this->order->id);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Simulated network timeout');
+
+        $job->handle(app(RefundOrderAction::class));
+    }
+
+    public function test_provider_exception_reverts_order_to_queued(): void
+    {
+        $this->mockThrowingAdapter();
+
+        $job = new SubmitSmmOrderJob($this->order->id);
+
+        try {
+            $job->handle(app(RefundOrderAction::class));
+        } catch (RuntimeException) {
+            // Expected — the re-throw for retry
+        }
+
+        $this->order->refresh();
+        // Order should be reverted to queued for retry
+        $this->assertEquals(OrderStatus::QUEUED, $this->order->status);
+    }
+
+    public function test_provider_exception_does_not_refund_on_first_attempt(): void
+    {
+        $this->mockThrowingAdapter();
+
+        $job = new SubmitSmmOrderJob($this->order->id);
+
+        try {
+            $job->handle(app(RefundOrderAction::class));
+        } catch (RuntimeException) {
+            // Expected
+        }
+
+        $this->wallet->refresh();
+        // Wallet should NOT be refunded — the exception is retriable
+        $this->assertEquals(475000, $this->wallet->available_amount_rial);
+    }
+
+    // ──────────────────────────────────────────────
+    // Final Failure (failed() method — all retries exhausted)
+    // ──────────────────────────────────────────────
+
+    public function test_failed_method_refunds_wallet_on_final_failure(): void
+    {
+        $job = new SubmitSmmOrderJob($this->order->id);
+
+        // Simulate Laravel calling failed() after all retries exhausted
+        $job->failed(new RuntimeException('All retries exhausted'));
+
+        $this->wallet->refresh();
+        $this->assertEquals(500000, $this->wallet->available_amount_rial);
+    }
+
+    public function test_failed_method_transitions_order_to_failed(): void
+    {
+        $job = new SubmitSmmOrderJob($this->order->id);
+
+        $job->failed(new RuntimeException('All retries exhausted'));
+
+        $this->order->refresh();
+        // Order should be failed then refunded
+        $this->assertContains($this->order->status, [OrderStatus::FAILED, OrderStatus::REFUNDED]);
+    }
+
+    public function test_failed_method_skips_if_order_already_submitted(): void
+    {
+        // Manually set order to submitted (simulates race condition)
+        $this->order->update(['status' => OrderStatus::SUBMITTED->value]);
+
+        $job = new SubmitSmmOrderJob($this->order->id);
+        $job->failed(new RuntimeException('Some error'));
+
+        $this->wallet->refresh();
+        // No refund should happen — order was already submitted
+        $this->assertEquals(475000, $this->wallet->available_amount_rial);
+    }
+
+    // ──────────────────────────────────────────────
+    // Notification on Failure
+    // ──────────────────────────────────────────────
+
+    public function test_failure_sends_user_notification(): void
+    {
+        $this->mockFailingAdapter();
+
+        $job = new SubmitSmmOrderJob($this->order->id);
+        $job->handle(app(RefundOrderAction::class));
+
+        Queue::assertPushed(SendTelegramMessageJob::class);
+    }
+
+    // ──────────────────────────────────────────────
+    // Job Configuration
+    // ──────────────────────────────────────────────
+
+    public function test_job_has_3_retries(): void
+    {
+        $job = new SubmitSmmOrderJob($this->order->id);
+        $this->assertSame(3, $job->tries);
+    }
+
+    public function test_job_has_exponential_backoff(): void
+    {
+        $job = new SubmitSmmOrderJob($this->order->id);
+        $this->assertSame([10, 60], $job->backoff);
+    }
+
+    // ──────────────────────────────────────────────
+    // Helpers
+    // ──────────────────────────────────────────────
+
     /**
-     * Bind a mock adapter that always returns failure.
+     * Bind a mock adapter that returns ProviderOrderResult::failure() (non-retriable).
      */
     private function mockFailingAdapter(): void
     {
@@ -123,9 +256,9 @@ class SubmitSmmOrderJobFailureTest extends TestCase
                 return ProviderOrderResult::failure('Simulated provider failure');
             }
 
-            public function getOrderStatus(string $providerOrderId): \App\Modules\Smm\DTOs\ProviderOrderStatusResult
+            public function getOrderStatus(string $providerOrderId): ProviderOrderStatusResult
             {
-                return new \App\Modules\Smm\DTOs\ProviderOrderStatusResult(\App\Modules\Orders\Enums\OrderStatus::FAILED);
+                return new ProviderOrderStatusResult(OrderStatus::FAILED);
             }
 
             public function getBalance(): float|int
@@ -134,25 +267,48 @@ class SubmitSmmOrderJobFailureTest extends TestCase
             }
         };
 
-        // Override the factory to return our failing adapter
-        $this->app->singleton(SmmProviderFactory::class, function () use ($failingAdapter) {
-            return new class($failingAdapter) extends SmmProviderFactory {
-                public function __construct(private readonly SmmProviderContract $adapter) {}
-                public static function make(string $providerCode): SmmProviderContract
+        $this->app->instance('test.failing.adapter', $failingAdapter);
+
+        $this->app->bind(SmmProviderFactory::class, function () {
+            return new class {
+                public static function make(string $code): SmmProviderContract
                 {
-                    // This won't work with static, so we need a different approach
                     return app('test.failing.adapter');
                 }
             };
         });
+    }
 
-        $this->app->instance('test.failing.adapter', $failingAdapter);
+    /**
+     * Bind a mock adapter that throws an exception (retriable).
+     */
+    private function mockThrowingAdapter(): void
+    {
+        $throwingAdapter = new class implements SmmProviderContract {
+            public function createOrder(array $normalizedPayload): ProviderOrderResult
+            {
+                throw new RuntimeException('Simulated network timeout');
+            }
 
-        // Actually bind at the factory level
-        $this->app->bind(SmmProviderFactory::class, function () use ($failingAdapter) {
-            return new class($failingAdapter) {
-                public function __construct(private SmmProviderContract $adapter) {}
-                public static function make(string $code): SmmProviderContract { return app('test.failing.adapter'); }
+            public function getOrderStatus(string $providerOrderId): ProviderOrderStatusResult
+            {
+                throw new RuntimeException('Simulated network timeout');
+            }
+
+            public function getBalance(): float|int
+            {
+                return 0;
+            }
+        };
+
+        $this->app->instance('test.throwing.adapter', $throwingAdapter);
+
+        $this->app->bind(SmmProviderFactory::class, function () {
+            return new class {
+                public static function make(string $code): SmmProviderContract
+                {
+                    return app('test.throwing.adapter');
+                }
             };
         });
     }

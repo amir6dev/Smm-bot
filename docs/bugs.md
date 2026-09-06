@@ -45,3 +45,41 @@ This document strictly tracks all test failures, logical bugs, and architectural
 - **Affected Component:** `App\Modules\Orders\Models\OrderEvent`
 - **Resolution:** Added relationship and casts in Step 5.
 
+---
+
+### **Date:** 2026-09-06 (Discovered during Step 6 security audit)
+
+- **Bug ID:** SEC-1
+- **Bug Description:** `TelegramWebhookController` used `abort(403)` which throws an HTML exception page, potentially exposing stack traces, internal file paths, and framework version in non-production environments. Also, the secret comparison used `!==` instead of `hash_equals()`, making it vulnerable to timing attacks.
+- **Affected Component:** `App\Modules\Telegram\Controllers\TelegramWebhookController`
+- **Resolution:** Replaced `abort(403)` with `response()->json(['status' => 'error'], 403)`. Replaced `!==` with `hash_equals()`. Added `empty()` checks for both expected secret and provided token.
+
+- **Bug ID:** SEC-2
+- **Bug Description:** No request body validation on webhook endpoint. Malformed JSON or missing `update_id` field was silently accepted with HTTP 200, causing Telegram to consider garbage payloads "processed."
+- **Affected Component:** `App\Modules\Telegram\Controllers\TelegramWebhookController`
+- **Resolution:** Added validation: `empty($update) || !isset($update['update_id']) || !is_numeric($update['update_id'])` → returns 400 JSON.
+
+- **Bug ID:** SEC-3
+- **Bug Description:** Webhook endpoint had no rate limiting. Completely unprotected against flood attacks.
+- **Affected Component:** `routes/web.php`, Telegram webhook
+- **Resolution:** Created `TelegramWebhookRateLimiter` middleware (60 req/min/IP) and applied to webhook route.
+
+- **Bug ID:** SEC-4
+- **Bug Description:** No duplicate `update_id` protection. The same Telegram update could trigger handlers multiple times if Telegram retried delivery, potentially causing duplicate wallet debits or order creation.
+- **Affected Component:** `App\Modules\Telegram\Controllers\TelegramWebhookController`
+- **Resolution:** Created `TelegramUpdateIdTracker` service using Laravel cache with 5-minute TTL. Integrated into webhook controller.
+
+- **Bug ID:** SEC-5
+- **Bug Description:** Handler exceptions in the webhook controller were uncaught, causing Laravel's default exception handler to return HTML error pages with potential stack traces and internal details.
+- **Affected Component:** `App\Modules\Telegram\Controllers\TelegramWebhookController`
+- **Resolution:** Wrapped handler dispatch in `try/catch (Throwable)`, returning safe JSON `['status' => 'error']` with HTTP 500. Errors logged securely with `update_id` context.
+
+- **Bug ID:** BUG-6
+- **Bug Description:** `Money::toToman()` used `(int)($this->amountRial / 10)` which performs float division before int cast. For certain edge-case values, float precision errors could produce incorrect results.
+- **Affected Component:** `App\Modules\Shared\ValueObjects\Money`
+- **Resolution:** Changed to `intdiv($this->amountRial, 10)` for strict integer division. Added overflow protection on `fromToman()` and `fromRial()`/`toRial()` convenience methods.
+
+- **Bug ID:** BUG-7
+- **Bug Description:** `SubmitSmmOrderJob` had `$tries = 1`, meaning any provider exception (network timeout, 5xx error) would immediately fail the order and refund. No retry capability existed.
+- **Affected Component:** `App\Jobs\SubmitSmmOrderJob`
+- **Resolution:** Changed to `$tries = 3` with `$backoff = [10, 60]` for exponential backoff. Retriable failures (exceptions) now re-throw for Laravel retry mechanism. Added `failed()` method for terminal failure handling with refund. Non-retriable failures (explicit `ProviderOrderResult::failure()`) remain immediately terminal.

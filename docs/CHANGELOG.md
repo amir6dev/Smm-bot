@@ -79,3 +79,29 @@
   - `OrderTrackingTest`: Ownership enforcement across queries.
   - `SubmitSmmOrderJobTest`: Full job lifecycle, idempotency, event recording.
   - `SubmitSmmOrderJobFailureTest`: Adapter failure → failed → refunded, no double refunds.
+
+## 2026-09-06
+- **Phase 1 (Vertical Slice) Step 6**: Telegram Webhook Hardening, Validation, Integration Tests & Phase 1 Completion.
+- **Security Hardening (SEC-1 through SEC-5)**:
+  - `TelegramWebhookController`: Replaced `abort(403)` with safe JSON responses. Replaced `!==` with timing-safe `hash_equals()`. Added `empty()` guard for unconfigured secrets.
+  - Added request body validation: requires `update_id` field, rejects malformed payloads with HTTP 400 JSON.
+  - Wrapped handler dispatch in `try/catch (Throwable)` — returns safe HTTP 500 JSON, never exposes stack traces.
+  - Created `TelegramUpdateIdTracker` service (cache-based, 5-min TTL) for duplicate `update_id` protection.
+  - Created `TelegramWebhookRateLimiter` middleware (60 req/min/IP) with safe HTTP 429 JSON response.
+  - Applied rate limiter to webhook route in `routes/web.php`.
+- **Code Quality Fixes**:
+  - `Money::toToman()`: Fixed float division bug — changed `(int)($amountRial / 10)` to `intdiv($amountRial, 10)`. Added `fromRial()`, `toRial()`, overflow protection on `fromToman()`.
+  - `SubmitSmmOrderJob`: Changed `$tries = 1` → `$tries = 3` with `$backoff = [10, 60]`. Retriable failures (exceptions) re-throw for Laravel retry mechanism. Added `failed()` method for terminal failure handling (refund + notification). Non-retriable failures remain immediately terminal.
+- **New Unit Tests**:
+  - `MoneyValueObjectTest`: 16 tests — fromToman/toRial conversion, integer division, overflow, add/subtract/comparison, immutability, zero/boundary values.
+  - `ActionTokenGeneratorTest`: 6 tests — length, hex format, uniqueness (100 tokens), cryptographic randomness, byte range usage.
+  - `OrderCodeGeneratorTest`: 7 tests — format pattern, date, random portion, uniqueness (1000 codes), prefix, length, uppercase hex.
+  - `PriceCalculatorTest` (extended): 9 new boundary tests — quantity 1/1000/1M, price=0, zero quantity, spec example, float prevention, ceil verification.
+- **New Feature Tests**:
+  - `TelegramWebhookTest`: 11 tests — valid/missing/wrong/empty secret (403), malformed body (400), rate limit (429), /start user creation, duplicate /start, duplicate update_id, safe JSON response.
+  - `PurchaseFlowTest`: 11 tests — full vertical slice verification: price calculation, wallet debit, order status, job dispatch, action token, dynamic inputs, snapshot, event, quantity validation, Toman display.
+  - `WalletDebitTest`: 8 tests — sufficient balance debit, balance_after correctness, transaction records, insufficient balance rejection, no negative balance, immutability enforcement.
+  - `ConcurrentWalletTest`: 3 tests — competing debits (one succeeds), both succeed, balance-never-negative invariant.
+- **Enhanced Integration Tests**:
+  - `SubmitSmmOrderJobTest`: Added 4 new tests — exact event count (2), submitted_at timestamp, provider code routing, no duplicate events on re-execution.
+  - `SubmitSmmOrderJobFailureTest`: Added 7 new tests — retry path (exception re-throw, revert to queued, no premature refund), `failed()` method (refund, transition, skip-if-submitted), job configuration verification ($tries=3, $backoff).
