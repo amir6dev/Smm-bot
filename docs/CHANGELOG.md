@@ -105,3 +105,29 @@
 - **Enhanced Integration Tests**:
   - `SubmitSmmOrderJobTest`: Added 4 new tests — exact event count (2), submitted_at timestamp, provider code routing, no duplicate events on re-execution.
   - `SubmitSmmOrderJobFailureTest`: Added 7 new tests — retry path (exception re-throw, revert to queued, no premature refund), `failed()` method (refund, transition, skip-if-submitted), job configuration verification ($tries=3, $backoff).
+
+## 2026-09-07
+- **Phase 1 (Vertical Slice) Step 7**: Final Stabilization & Production Readiness Audit.
+- **Comprehensive Audit** (30+ audit criteria verified across 50+ source files):
+  - Money Integrity: ✅ All `intdiv()`, no `(float)/(double)` casts.
+  - Wallet Integrity: ✅ `lockForUpdate()`, `DB::transaction()`, idempotency keys, `LogicException` immutability.
+  - Order Event Integrity: ✅ Append-only with `LogicException` protection.
+  - Order State Machine: ✅ Valid transitions only, terminal states enforced.
+  - Idempotency: ✅ DB UNIQUE constraints on `action_token`, `idempotency_key`, `order_code`.
+  - Webhook Security: ✅ `hash_equals()`, safe JSON responses, rate limiting, no stack traces.
+  - Webhook Performance: ✅ No blocking calls, all heavy work in queued jobs.
+  - Refund Safety: ✅ `CreditWalletAction` with idempotency key, `lockForUpdate()` on order + wallet.
+  - Job Idempotency: ✅ Status checks prevent re-submission. `$tries=3`, `$backoff=[10,60]`.
+  - Provider Boundary: ✅ `SmmProviderFactory::make()`, no direct adapter instantiation.
+  - Order Snapshot: ✅ Historical data preserved in `snapshot_json`.
+  - Order Tracking Security: ✅ User-scoped queries via `forUser($userId)`.
+  - Conversation State: ✅ `UNIQUE(user_id)`, TTL checking, expired cleanup.
+  - Artisan Commands: ✅ `CreditWalletAction` for seeding, no direct balance manipulation.
+  - Database Integrity: ✅ All UNIQUE constraints, BIGINT for money, correct FKs and indexes.
+  - Mass Assignment: ✅ `$fillable`/`$guarded` on all models. `encrypted_token` in `$hidden`.
+  - Callback Tampering: ✅ `hash_equals()` token validation, server-side price/quantity.
+  - Secrets: ✅ No secrets in logs or code. No `TELEGRAM_BOT_TOKEN` references in app code.
+  - Code Quality: ✅ No `dd()`, `dump()`, `TODO`, `FIXME`.
+- **Bug Fixes**:
+  - BUG-8: `PriceCalculator::calculate()` and `maxAffordableQuantity()` used `ceil()/floor()` with float division. Fixed to pure `intdiv()` integer arithmetic.
+  - BUG-9: `StartHandler` used raw `DB::table('wallet_accounts')->insert()` bypassing `WalletAccount` model. Fixed to `WalletAccount::firstOrCreate()` with explicit defaults.

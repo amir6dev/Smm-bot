@@ -5,16 +5,11 @@ declare(strict_types=1);
 namespace App\Modules\Telegram\Handlers;
 
 use App\Models\User;
-use Illuminate\Support\Facades\DB;
-use App\Modules\Telegram\Services\TelegramApiService;
 use App\Modules\Telegram\Keyboards\MainMenuKeyboard;
+use App\Modules\Wallet\Models\WalletAccount;
 
 class StartHandler
 {
-    public function __construct(
-        private readonly TelegramApiService $telegramApiService
-    ) {}
-
     public function handle(array $message): void
     {
         $chatId = (string) $message['chat']['id'];
@@ -35,13 +30,14 @@ class StartHandler
         );
 
         // Ensure zero-balance wallet exists for new registrations
-        if (!DB::table('wallet_accounts')->where('user_id', $user->id)->exists()) {
-            DB::table('wallet_accounts')->insert([
-                'user_id' => $user->id,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
-        }
+        WalletAccount::firstOrCreate(
+            ['user_id' => $user->id],
+            [
+                'available_amount_rial' => 0,
+                'blocked_amount_rial' => 0,
+                'version' => 1,
+            ]
+        );
 
         $displayName = $firstName ?? 'کاربر';
         $welcomeMessage = "سلام {$displayName} عزیز!\nبه پلتفرم خدمات SMM ما خوش آمدید.\nلطفاً از منوی زیر یک گزینه را انتخاب کنید:";
@@ -49,3 +45,4 @@ class StartHandler
         \App\Jobs\SendTelegramMessageJob::dispatch($chatId, $welcomeMessage, MainMenuKeyboard::get());
     }
 }
+

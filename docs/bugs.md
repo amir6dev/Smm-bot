@@ -83,3 +83,19 @@ This document strictly tracks all test failures, logical bugs, and architectural
 - **Bug Description:** `SubmitSmmOrderJob` had `$tries = 1`, meaning any provider exception (network timeout, 5xx error) would immediately fail the order and refund. No retry capability existed.
 - **Affected Component:** `App\Jobs\SubmitSmmOrderJob`
 - **Resolution:** Changed to `$tries = 3` with `$backoff = [10, 60]` for exponential backoff. Retriable failures (exceptions) now re-throw for Laravel retry mechanism. Added `failed()` method for terminal failure handling with refund. Non-retriable failures (explicit `ProviderOrderResult::failure()`) remain immediately terminal.
+
+---
+
+### **Date:** 2026-09-07 (Discovered during Step 7 production readiness audit)
+
+- **Bug ID:** BUG-8
+- **Bug Description:** `PriceCalculator::calculate()` uses `(int) ceil(($quantity * $pricePer1000Rial) / 1000)` which performs float division via PHP's `/` operator before applying `ceil()`. Similarly, `maxAffordableQuantity()` uses `(int) floor(($balanceRial * 1000) / $pricePer1000Rial)`. For very large monetary values, floating-point precision errors could produce silently incorrect results.
+- **Severity:** Medium
+- **Affected Component:** `App\Modules\Catalog\Services\PriceCalculator`
+- **Resolution:** Replaced with pure integer arithmetic: `intdiv($numerator + 999, 1000)` for ceiling division, `intdiv($balanceRial * 1000, $pricePer1000Rial)` for floor division. No float intermediaries.
+
+- **Bug ID:** BUG-9
+- **Bug Description:** `StartHandler` uses `DB::table('wallet_accounts')->insert(...)` to create wallet accounts, bypassing the `WalletAccount` Eloquent model. This is inconsistent with the rest of the architecture and does not explicitly set `available_amount_rial=0`, `blocked_amount_rial=0`, `version=1` — it relies on database column defaults.
+- **Severity:** Low
+- **Affected Component:** `App\Modules\Telegram\Handlers\StartHandler`
+- **Resolution:** Replaced with `WalletAccount::firstOrCreate(...)` using explicit field values. Removed unused `TelegramApiService` constructor dependency.
